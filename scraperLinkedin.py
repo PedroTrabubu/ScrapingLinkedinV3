@@ -8,56 +8,99 @@ from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
 from utils_Linkedin import parse_salary
 
-def get_webdriver():
-    options = Options()
-    options.add_argument("--start-maximized")
-    options.add_argument("--incognito")
-    options.add_argument ("--disable-blink-features=AutomationControlled")#LInea nueva Pedro
-    #return webdriver.Chrome(options=options)
-    driver = webdriver.Chrome(options=options)#LInea nueva Pedro
-    driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")#LInea nueva Pedro
-    return driver #LInea nueva Pedro
+from playwright.sync_api import sync_playwright
 
-def scroll_page(driver, max_scrolls, scroll_pause):
-    last_height = driver.execute_script("return document.body.scrollHeight")
-    scroll_count = 0
+def get_browser():
+    p = sync_playwright().start()
 
-    while scroll_count < max_scrolls:
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(scroll_pause)
-        
+    browser = p.chromium.launch(
+        headless=True,  # 🔥 clave para servidor
+        args=[
+            "--disable-blink-features=AutomationControlled"
+        ]
+    )
+
+    context = browser.new_context(
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+        viewport={"width": 1920, "height": 1080}
+    )
+
+    page = context.new_page()
+
+    return p, browser, context, page
+
+def scroll_page(page, max_scrolls=15, scroll_pause=2):
+    for i in range(max_scrolls):
+        page.mouse.wheel(0, 3000)
+        page.wait_for_timeout(scroll_pause * 1000)
+
         try:
-            buttons = driver.find_elements(By.CSS_SELECTOR, "button.infinite-scroller__show-more-button, button[aria-label='Ver más empleos'], button[aria-label='See more jobs']")
-            for btn in buttons:
-                if btn.is_displayed():
-                    driver.execute_script("arguments[0].click();", btn)
-                    time.sleep(scroll_pause)
-                    break
-        except Exception:
+            button = page.locator("button:has-text('Ver más empleos'), button:has-text('See more jobs')")
+            if button.is_visible():
+                button.click()
+                page.wait_for_timeout(2000)
+        except:
             pass
 
-        new_height = driver.execute_script("return document.body.scrollHeight")
-        if new_height == last_height:
-            driver.execute_script("window.scrollBy(0, -200);")
-            time.sleep(0.5)
-            driver.execute_script("window.scrollBy(0, 500);")
-            time.sleep(1)
-            if driver.execute_script("return document.body.scrollHeight") == last_height:
-                break
-        
-        last_height = new_height
-        scroll_count += 1
-    
-    print(f"  -> Scroll finalizado ({scroll_count} pasos).")
+    print(f"  -> Scroll finalizado ({max_scrolls} pasos).")
 
-def fetch_job_details(driver, job_url, detail_pause, max_retries = 2):
+def fetch_job_details(page, job_url, detail_pause, max_retries=2):
     job_desc, company_desc, recruiter_name, recruiter_url = "", "", "", ""
     salary, sector_id, modality = "No especificado", "No especificado", "No especificado"
     exito = False
 
     for intento in range(max_retries):
         try:
-            driver.get(job_url)
+            page.goto(job_url, timeout=60000)
+            page.wait_for_timeout((detail_pause + intento * 3) * 1000)
+
+            html = page.content()
+            soup = BeautifulSoup(html, "html.parser")
+
+            # Salario
+            salary_tag = soup.find("div", class_="salary-main-content")
+            if salary_tag:
+                salary = salary_tag.get_text(strip=True)
+
+            # Modalidad
+            fit_level_div = soup.find("div", class_="job-details-fit-level-preferences")
+            if fit_level_div:
+                fit_text = fit_level_div.get_text(strip=True).lower()
+                if "remote" in fit_text:
+                    modality = "Remoto"
+                elif "hybrid" in fit_text:
+                    modality = "Híbrido"
+                elif "on-site" in fit_text:
+                    modality = "Presencial"
+
+            # Descripción
+            job_div = soup.find("div", class_="show-more-less-html__markup") or \
+                      soup.find("div", class_="description__text")
+
+            if job_div:
+                job_desc = job_div.get_text(separator="\n", strip=True)
+
+            # Reclutador
+            recruiter_link = soup.find("a", href=lambda x: x and "/in/" in x)
+            if recruiter_link:
+                recruiter_url = recruiter_link["href"]
+                recruiter_name = recruiter_link.get_text(strip=True)
+
+            exito = True
+            break
+
+        except Exception:
+            print(f"⚠️ Error intento {intento+1}")
+            page.wait_for_timeout(3000)
+
+    return job_desc, company_desc, recruiter_name, recruiter_url, salary, sector_id, modality, exito
+    job_desc, company_desc, recruiter_name, recruiter_url = "", "", "", ""
+    salary, sector_id, modality = "No especificado", "No especificado", "No especificado"
+    exito = False
+
+    for intento in range(max_retries):
+        try:
+            driver.goto(job_url)
             # Si es un reintento, esperamos un poco más para asegurar que carga
             time.sleep(detail_pause + (intento * 3)) 
             #time.sleep(random.uniform(2, 5) + (intento * 3)) #Linea nueva Pedro

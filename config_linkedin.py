@@ -8,7 +8,7 @@ DB_CONFIG = {
     "host": "localhost",
     "database": "prueba1",
     "user": "postgres",
-    "password": "",  # TODO: mover a variable de entorno
+    "password": "postgres123",  # TODO: mover a variable de entorno
     "port": "5432",
 }
 # -------------------------------------------------------------------

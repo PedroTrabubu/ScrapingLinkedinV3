@@ -1,5 +1,6 @@
 import time
 import re
+import random
 from datetime import datetime, timezone
 from bs4 import BeautifulSoup
 
@@ -7,21 +8,18 @@ from clasificador_sectores import clasificar_sector_oferta
 import config_linkedin as config
 from db import Database
 from utils_Linkedin import build_linkedin_url
-from scraperLinkedin import get_webdriver, scroll_page, fetch_job_details
+from scraperLinkedin import get_browser, scroll_page, fetch_job_details
 
 
 def main():
     db = Database(config.DB_CONFIG)
-    driver = get_webdriver()
+    p, browser, context, page = get_browser()
 
-    # Para evitar duplicados en memoria durante la ejecución
     PROCESSED_JOB_IDS = set()
-
     contador_ofertas = 0
     errores_consecutivos = 0
 
     try:
-        # Recorremos sectores definidos en config
         for nombre_sector, keyword_busqueda in config.SECTORES_LINKEDIN.items():
             print(f"INICIANDO BÚSQUEDA MASIVA: '{nombre_sector}'")
 
@@ -31,52 +29,36 @@ def main():
                 bloques_sin_novedad = 0
                 current_start = 0
 
-                # Bucle de paginación
-                for p in range(config.PAGES):
+                for p_idx in range(config.PAGES):
 
-                    # Corte por demasiados bloques sin resultados nuevos
                     if bloques_sin_novedad >= 3:
-                        if bloques_sin_novedad >= 25:
-                            print("Demasiados bloques sin ofertas nuevas. Fin para este sector.")
                         break
 
-                    print(f"\n--- BLOQUE {p+1}/{config.PAGES} | Offset: {current_start} ---")
+                    print(f"\n--- BLOQUE {p_idx+1}/{config.PAGES} | Offset: {current_start} ---")
 
-                    # Aquí se decide si buscar por keyword o por sector
-                    if config.JOB_KEYWORD:
-                        url = build_linkedin_url(
-                            config.JOB_KEYWORD,
-                            country,
-                            config.EXPERIENCE_LEVELS,
-                            config.WORKPLACE_TYPES,
-                            config.DATE_POSTED,
-                            config.SECTORS,
-                            current_start
-                        )
-                    else:
-                        url = build_linkedin_url(
-                            keyword_busqueda,
-                            country,
-                            config.EXPERIENCE_LEVELS,
-                            config.WORKPLACE_TYPES,
-                            config.DATE_POSTED,
-                            config.SECTORS,
-                            current_start
-                        )
+                    keyword = config.JOB_KEYWORD if config.JOB_KEYWORD else keyword_busqueda
 
-                    # Carga página
-                    driver.get(url)
-                    time.sleep(config.SCROLL_PAUSE)
+                    url = build_linkedin_url(
+                        keyword,
+                        country,
+                        config.EXPERIENCE_LEVELS,
+                        config.WORKPLACE_TYPES,
+                        config.DATE_POSTED,
+                        config.SECTORS,
+                        current_start
+                    )
 
-                    # Scroll para cargar más ofertas
-                    scroll_page(driver, max_scrolls=15, scroll_pause=config.SCROLL_PAUSE)
+                    page.goto(url, timeout=60000)
+                    page.wait_for_timeout(random.randint(3000, 5000))
 
-                    soup = BeautifulSoup(driver.page_source, "html.parser")
+                    scroll_page(page, max_scrolls=15, scroll_pause=config.SCROLL_PAUSE)
+
+                    html = page.content()
+                    soup = BeautifulSoup(html, "html.parser")
                     job_cards = soup.find_all("div", class_="base-card")
 
-                    # Si no hay tarjetas, saltamos más profundo
                     if not job_cards:
-                        print("No se encontraron tarjetas. Saltando offset.")
+                        print("No se encontraron tarjetas.")
                         current_start += 100
                         bloques_sin_novedad += 1
                         continue
@@ -89,7 +71,6 @@ def main():
                         urn_tag = card.get("data-entity-urn")
                         job_id = urn_tag.split(":")[-1] if urn_tag else "0"
 
-                        # Evitar duplicados
                         if job_id in PROCESSED_JOB_IDS:
                             continue
                         PROCESSED_JOB_IDS.add(job_id)
@@ -123,52 +104,42 @@ def main():
 
                         publish_date = time_tag["datetime"] if time_tag and "datetime" in time_tag.attrs else ""
 
-                        # Filtrado de antigüedad (máx 14 días)
+                        # filtro antigüedad
                         if publish_date:
                             try:
                                 p_date = datetime.fromisoformat(publish_date)
                                 if p_date.tzinfo is None:
                                     p_date = p_date.replace(tzinfo=timezone.utc)
 
-                                diff_days = (datetime.now(timezone.utc) - p_date).days
-
-                                if diff_days > 14:
-                                    print(f"Omitiendo oferta antigua ({diff_days} días)")
+                                if (datetime.now(timezone.utc) - p_date).days > 14:
                                     continue
-                            except Exception:
+                            except:
                                 pass
 
-                        # Entramos al detalle
                         job_desc, company_desc, recruiter_name, recruiter_url, salary, sector_text, modality, exito = fetch_job_details(
-                            driver, job_url, config.DETAIL_PAUSE
+                            page, job_url, config.DETAIL_PAUSE
                         )
 
-                        # Anti bloqueo
                         if not exito:
                             errores_consecutivos += 1
                             if errores_consecutivos >= 3:
-                                print("Posible bloqueo de LinkedIn. Pausa 3 minutos.")
+                                print("Pausa anti-bloqueo...")
                                 time.sleep(180)
                                 errores_consecutivos = 0
                         else:
                             errores_consecutivos = 0
 
-                        # Detección de modalidad
                         texto_total = f"{modality} {location} {job_title} {job_desc}".lower()
 
-                        if re.search(r'\b(remoto|remote|teletrabajo)\b', texto_total):
+                        if re.search(r'\b(remoto|remote)\b', texto_total):
                             modality = "Remoto"
                         elif re.search(r'\b(h[ií]brido|hybrid)\b', texto_total):
                             modality = "Híbrido"
-                        elif re.search(r'\b(presencial|on-site|onsite)\b', texto_total):
+                        elif re.search(r'\b(presencial|on-site)\b', texto_total):
                             modality = "Presencial"
-                        else:
-                            modality = "No especificado"
 
-                        # Clasificación sectorial
                         taxonomia = clasificar_sector_oferta(job_desc, company_desc, company_name)
 
-                        # Procesado de salario
                         salario_final = None
                         if salary not in ["No especificado", None, ""]:
                             numeros = re.findall(r'\d+', str(salary))
@@ -177,7 +148,6 @@ def main():
                             elif len(numeros) == 1:
                                 salario_final = numeros[0]
 
-                        # Construcción del objeto final
                         job_data = {
                             "id": job_id,
                             "portal": "LinkedIn",
@@ -206,7 +176,6 @@ def main():
                         db.save_job(job_data)
                         new_in_block += 1
 
-                    # Control de avance de paginación
                     if new_in_block == 0:
                         bloques_sin_novedad += 1
                         current_start += 100
@@ -216,14 +185,9 @@ def main():
 
         print(f"\nScraping finalizado. Total ofertas únicas: {len(PROCESSED_JOB_IDS)}")
 
-    except Exception:
-        import traceback
-        print("ERROR CRÍTICO")
-        traceback.print_exc()
-        input("Presiona ENTER para salir")
-
     finally:
-        driver.quit()
+        browser.close()
+        p.stop()
         db.close()
 
 
